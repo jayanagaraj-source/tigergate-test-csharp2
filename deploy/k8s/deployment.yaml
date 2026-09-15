@@ -1,0 +1,59 @@
+# IaC FIXTURE - deliberately misconfigured.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tigergate-demo-api
+  namespace: default
+  labels:
+    app: tigergate-demo-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tigergate-demo-api
+  template:
+    metadata:
+      labels:
+        app: tigergate-demo-api
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      automountServiceAccountToken: true
+      serviceAccountName: default
+      containers:
+        - name: api
+          image: registry.example.com/tigergate-demo-api:latest
+          imagePullPolicy: Always
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_RAW
+          ports:
+            - containerPort: 80
+              hostPort: 80
+          env:
+            - name: ConnectionStrings__Shop
+              value: "Server=db;Database=Shop;User Id=sa;Password=P@ssw0rd!2019;TrustServerCertificate=true"
+            - name: JWT_SIGNING_KEY
+              value: "S3cr3t-Sign1ng-K3y-D0-N0t-Sh1p-2019-tigergate-demo"
+          # No resource requests or limits, no probes.
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock

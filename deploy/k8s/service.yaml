@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: tigergate-demo-api
+  namespace: default
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Cluster
+  selector:
+    app: tigergate-demo-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      protocol: TCP

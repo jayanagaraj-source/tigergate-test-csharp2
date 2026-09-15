@@ -1,0 +1,43 @@
+# IaC FIXTURE - deliberately misconfigured.
+version: "3.8"
+
+services:
+  api:
+    build: .
+    privileged: true
+    network_mode: host
+    pid: host
+    restart: always
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    volumes:
+      - /:/host
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Shop: "Server=db;Database=Shop;User Id=sa;Password=P@ssw0rd!2019;TrustServerCertificate=true"
+      JWT_SIGNING_KEY: "S3cr3t-Sign1ng-K3y-D0-N0t-Sh1p-2019-tigergate-demo"
+
+  db:
+    image: mcr.microsoft.com/mssql/server:latest
+    environment:
+      ACCEPT_EULA: "Y"
+      SA_PASSWORD: "P@ssw0rd!2019"
+      MSSQL_PID: Developer
+    ports:
+      - "0.0.0.0:1433:1433"
+    volumes:
+      - dbdata:/var/opt/mssql
+
+  cache:
+    image: redis:latest
+    command: redis-server --protected-mode no
+    ports:
+      - "0.0.0.0:6379:6379"
+
+volumes:
+  dbdata:

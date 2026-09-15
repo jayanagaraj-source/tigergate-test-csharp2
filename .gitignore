@@ -1,0 +1,44 @@
+## Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+TestResults/
+
+## NuGet
+packages/
+*.nupkg
+.nuget/
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Logs
+logs/
+*.log
+
+## ---------------------------------------------------------------------------
+## EXCEPTION - deliberate scanner trap. See README, "The bin/ trap fixture".
+##
+## This build artifact is committed ON PURPOSE so a scan can prove TigerGate
+## ignores build output and does not turn project self-references into packages.
+##
+## These negations MUST stay at the end of the file: git applies the last
+## matching pattern, so `[Dd]ebug/` above would otherwise re-exclude the parent
+## directory. Each parent directory is re-included before the file itself,
+## because git will not descend into an excluded directory.
+## ---------------------------------------------------------------------------
+!src/TigerGateDemo.Api/bin/
+!src/TigerGateDemo.Api/bin/Debug/
+!src/TigerGateDemo.Api/bin/Debug/net8.0/
+src/TigerGateDemo.Api/bin/Debug/net8.0/*
+!src/TigerGateDemo.Api/bin/Debug/net8.0/TigerGateDemo.Api.deps.json

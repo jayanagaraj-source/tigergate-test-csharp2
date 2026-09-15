@@ -1,0 +1,13 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Product>TigerGate Demo Shop</Product>
+    <Company>TigerGate Demo</Company>
+    <Authors>TigerGate Demo Team</Authors>
+    <Version>1.4.0</Version>
+  </PropertyGroup>
+
+</Project>
