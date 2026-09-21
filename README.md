@@ -276,3 +276,4 @@ The ground truth follows. Regenerate with `python3 scripts/inventory.py`.
 - [ ] **SBOM** — 46 declarations, 37 distinct packages, correct manifest paths.
 - [ ] **CBOM** — weak primitives (MD5, SHA-1, DES, 3DES, ECB, RSA-1024) separated from strong ones.
 # tigergate-test-csharp2
+# tigergate-test-csharp2
