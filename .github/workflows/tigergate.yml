@@ -1,0 +1,245 @@
+# TigerGate security scan.
+#
+# Runs the TigerGate CLI container against this repository and uploads the
+# results to the TigerGate environment selected below.
+#
+# The CLI image is fully driven by workflow inputs (cli_image / cli_tag), so a
+# custom or private build can be tested by dispatching with different values --
+# no edit to this file required. On push/PR the defaults apply.
+name: TigerGate Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      cli_image:
+        description: "TigerGate CLI image (without tag)"
+        type: string
+        required: true
+        default: tigergate/tigergate-cli
+      cli_tag:
+        description: "TigerGate CLI image tag"
+        type: string
+        required: true
+        default: latest
+      scan_type:
+        description: "Scan type to run"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - sast
+          - sca
+          - secrets
+          - iac
+      quality_gate:
+        description: "Enforce the quality gate (fails the job when the gate fails)"
+        type: boolean
+        required: true
+        default: false
+      resolve_dotnet:
+        description: "Install the .NET SDK so SCA resolves the full transitive graph (changes the SBOM package count -- see note in the step)"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+
+jobs:
+  scan:
+    name: TigerGate ${{ inputs.scan_type || 'all' }} scan
+    runs-on: ubuntu-latest
+
+    # The whole job runs inside the selected TigerGate CLI image.
+    container:
+      image: ${{ inputs.cli_image || 'tigergate/tigergate-cli' }}:${{ inputs.cli_tag || 'latest' }}
+      # The image declares ENTRYPOINT ["tigergate"]. GitHub Actions overrides the
+      # entrypoint itself to keep the container alive and then execs each step in
+      # a shell, so no `options: --entrypoint` override is needed here.
+
+    env:
+      TIGERGATE_API_KEY: ${{ secrets.TIGERGATE_API_KEY }}
+      TIGERGATE_API_URL: ${{ vars.TIGERGATE_API_URL || 'https://api.staging.tigergate.dev' }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # The CLI image ships no libicu, so any .NET SDK installed below must run
+      # in invariant-globalization mode or it aborts at startup.
+      DOTNET_SYSTEM_GLOBALIZATION_INVARIANT: "1"
+      DOTNET_NOLOGO: "1"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history is REQUIRED, not an optimisation. The secret scanner
+          # runs `gitleaks detect`, which walks git HISTORY rather than the
+          # working tree: on a shallow clone it sees one commit, and on a
+          # checkout with no commits it sees none and reports zero secrets even
+          # though the files are sitting right there. This repository carries 11
+          # planted secrets; a run reporting 0 means the history was truncated.
+          fetch-depth: 0
+
+      - name: Configure git safe.directory
+        # The container runs as root while the workspace is checked out by the
+        # runner user, so git refuses to operate on it ("dubious ownership")
+        # until the path is explicitly trusted.
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory '*'
+          git -C "$GITHUB_WORKSPACE" rev-parse --short HEAD
+
+      - name: TigerGate CLI version
+        # Printed before the scan so the exact CLI build under test is recorded
+        # in the job log.
+        run: tigergate --version
+
+      - name: Prepare dependency resolution for SCA
+        # This repository declares its dependencies in two NuGet manifest styles:
+        #   src/**/*.csproj              SDK-style <PackageReference>  (6 projects)
+        #   src/TigerGateDemo.Legacy/packages.config   legacy, net472  (7 packages)
+        #
+        # 46 package declarations across 37 distinct names; README.md holds the
+        # ground-truth table.
+        #
+        # The CLI resolves .NET through `dotnet list package` when the SDK is on
+        # PATH, and falls back to parsing the committed manifests when it is not.
+        # The CLI image ships NO dotnet, so the default run is manifest parsing:
+        # every DECLARED direct dependency, no transitives.
+        #
+        # That default is deliberate here. The README's ground truth is exactly
+        # the 46 source declarations, and the fixture's whole point is that a
+        # correct scan reads the source manifests rather than build output. Set
+        # resolve_dotnet=true to install the SDK and exercise full transitive
+        # resolution instead -- the package count then legitimately exceeds 46,
+        # so do not compare that run against the README table.
+        #
+        # TigerGateDemo.Legacy is net472 and absent from the .sln on purpose, so
+        # `dotnet restore` cannot touch it on Linux either way; its
+        # packages.config is always read statically.
+        if: contains(fromJSON('["all","sca"]'), inputs.scan_type || 'all')
+        run: |
+          set -e
+          echo "----- resolver availability in this image -----"
+          for t in syft trivy grype dotnet nuget msbuild git gitleaks semgrep; do
+            if command -v "$t" >/dev/null 2>&1; then
+              printf '  present  %-8s %s\n' "$t" "$(command -v "$t")"
+            else
+              printf '  absent   %s\n' "$t"
+            fi
+          done
+
+          echo "----- NuGet manifests found -----"
+          find . -name '*.csproj' -not -path '*/obj/*' -not -path '*/bin/*' -print
+          find . -name 'packages.config' -not -path '*/obj/*' -not -path '*/bin/*' -print
+
+          if [ "${{ inputs.resolve_dotnet || 'false' }}" != "true" ]; then
+            echo "::notice::resolve_dotnet=false - .NET dependencies are read from the committed manifests (declared direct dependencies only). This matches the 46-declaration ground truth in README.md."
+            exit 0
+          fi
+
+          if ! command -v dotnet >/dev/null 2>&1; then
+            echo "----- installing .NET SDK 8.0 -----"
+            curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+            chmod +x /tmp/dotnet-install.sh
+            /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet \
+              || { echo "::warning::.NET SDK install failed - SCA falls back to manifest parsing."; exit 0; }
+            ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet
+          fi
+
+          dotnet --info || { echo "::warning::dotnet is installed but will not start - SCA falls back to manifest parsing."; exit 0; }
+
+          # nuget.config in the repo root governs the feeds; restore only the
+          # solution, which excludes the net472 Legacy project by design.
+          dotnet restore TigerGateDemo.sln \
+            || echo "::warning::dotnet restore failed - SCA falls back to manifest parsing for the affected projects."
+
+      - name: Run TigerGate scan
+        id: scan
+        run: |
+          set -o pipefail
+          # NOTE ON --exclude: bin/ and obj/ are deliberately NOT excluded.
+          # src/TigerGateDemo.Api/bin/Debug/net8.0/TigerGateDemo.Api.deps.json is
+          # committed on purpose (see the .gitignore negation) as a trap: a
+          # correct scan must ignore build output on its own and must never
+          # report a manifest path under bin/ or obj/, nor a package named after
+          # one of this repo's own projects. Excluding those paths here would
+          # make the test vacuous.
+          tigergate scan \
+            --type "${{ inputs.scan_type || 'all' }}" \
+            --scan-scope full \
+            --upload \
+            --quality-gate=${{ inputs.quality_gate || 'false' }} \
+            2>&1 | tee /tmp/tigergate-scan.log
+
+      - name: Scan result
+        if: always()
+        run: |
+          LOG=/tmp/tigergate-scan.log
+
+          # Resolve one reported value. Uses the scan step's output first (for CLI
+          # builds that write to $GITHUB_OUTPUT), otherwise scans the captured log
+          # for the given label patterns. mode controls how the value is cut out of
+          # the matched text: num = trailing integer, url = the URL itself (never
+          # split on its own ":"), str = whatever follows the label separator.
+          extract() {
+            mode="$1"; preset="$2"; shift 2
+            if [ -n "$preset" ]; then printf '%s\n' "$preset"; return; fi
+            [ -f "$LOG" ] || { echo "n/a"; return; }
+            for pat in "$@"; do
+              m=$(grep -aioE "$pat" "$LOG" | tail -1)
+              [ -n "$m" ] || continue
+              case "$mode" in
+                num) v=$(printf '%s' "$m" | grep -oE '[0-9]+' | tail -1) ;;
+                url) v=$(printf '%s' "$m" | grep -oE 'https?://[^[:space:]"]+') ;;
+                *)   v=$(printf '%s' "$m" | sed -E 's/.*[:=][[:space:]]*//') ;;
+              esac
+              v=$(printf '%s' "$v" | sed -E 's/\x1b\[[0-9;]*m//g; s/^[[:space:]]+//; s/[[:space:]]+$//')
+              [ -n "$v" ] && { printf '%s\n' "$v"; return; }
+            done
+            echo "n/a"
+          }
+
+          SCAN_ID=$(extract  str "${{ steps.scan.outputs.scan_id }}"        'scan[ _-]?id[^A-Za-z0-9]{1,4}[A-Za-z0-9_-]+')
+          GATE=$(extract     str "${{ steps.scan.outputs.gate_status }}"    'quality[ _-]?gate[^:=]*[:=][[:space:]]*[A-Za-z]+' 'gate[ _-]?status[:=][[:space:]]*[A-Za-z]+')
+          TOTAL=$(extract    num "${{ steps.scan.outputs.total_findings }}" 'total[ _-]?findings[^0-9]{0,10}[0-9]+' 'total[^0-9a-z]{1,10}[0-9]+')
+          CRITICAL=$(extract num "${{ steps.scan.outputs.critical_count }}" 'critical[^0-9a-z]{0,10}[0-9]+')
+          HIGH=$(extract     num "${{ steps.scan.outputs.high_count }}"     'high[^0-9a-z]{0,10}[0-9]+')
+          SECRETS=$(extract  num ""                                         'secrets?[^0-9a-z]{0,12}[0-9]+' '[0-9]+[[:space:]]+secrets?')
+          URL=$(extract      url "${{ steps.scan.outputs.dashboard_url }}"  'https?://[^[:space:]"]*(scan|finding|dashboard|report)[^[:space:]"]*')
+
+          {
+            echo "## TigerGate scan result"
+            echo
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| CLI image | \`${{ inputs.cli_image || 'tigergate/tigergate-cli' }}:${{ inputs.cli_tag || 'latest' }}\` |"
+            echo "| Scan type | \`${{ inputs.scan_type || 'all' }}\` |"
+            echo "| .NET transitive resolution | \`${{ inputs.resolve_dotnet || 'false' }}\` |"
+            echo "| Quality gate enforced | \`${{ inputs.quality_gate || 'false' }}\` |"
+            echo "| Scan outcome | \`${{ steps.scan.outcome }}\` |"
+            echo "| Scan ID | $SCAN_ID |"
+            echo "| Gate status | $GATE |"
+            echo "| Total findings | $TOTAL |"
+            echo "| Critical | $CRITICAL |"
+            echo "| High | $HIGH |"
+            echo "| Secrets | $SECRETS |"
+            echo "| Dashboard / findings URL | $URL |"
+            echo
+            echo "Expected for this fixture on a full-history checkout: ~11 secrets, ~33 SAST,"
+            echo "46 SCA package declarations. A secrets count of 0 means the checkout had no"
+            echo "git history for \`gitleaks detect\` to walk."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+          # The value extraction above is best-effort: if this CLI build labels
+          # its summary differently, the fields read "n/a" and the raw output
+          # below is the source of truth.
+          echo
+          echo "----- raw CLI output (last 100 lines) -----"
+          if [ -f "$LOG" ]; then tail -100 "$LOG"; else echo "no scan log produced"; fi
